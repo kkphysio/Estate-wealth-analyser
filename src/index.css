@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Roboto Mono", monospace;
+
+  /* Brand Colors */
+  --color-re: #639922;
+  --color-re-light: #C0DD97;
+  --color-re-bg: #EAF3DE;
+  --color-re-dark: #173404;
+
+  --color-alt: #378ADD;
+  --color-alt-light: #85B7EB;
+  --color-alt-bg: #E6F1FB;
+  --color-alt-dark: #042C53;
+
+  --color-interest: #E24B4A;
+  --color-interest-light: #F09595;
+  --color-interest-bg: #FCEBEB;
+  --color-interest-dark: #501313;
+
+  --color-highlight: #EF9F27;
+  --color-highlight-light: #FAC775;
+  --color-highlight-bg: #FAEEDA;
+  --color-highlight-dark: #412402;
+
+  --color-success: #1D9E75;
+  --color-success-light: #5DCAA5;
+  --color-success-bg: #E1F5EE;
+  --color-success-dark: #04342C;
+
+  /* Neutral/Structure */
+  --color-primary-text: #F8FAFC;
+  --color-secondary-text: #94A3B8;
+  --color-tertiary-text: #64748B;
+  --color-border-color: #334155;
+  --color-light-border: #1E293B;
+  --color-surface: #1E293B;
+  --color-input-bg: #0F172A;
+  --color-hover: #334155;
+}
+
+body {
+  background-color: #0F172A;
+  color: #F8FAFC;
+}
+
+/* Custom transitions for sliders */
+input[type="range"]::-webkit-slider-thumb {
+  border: 2px solid #378ADD;
+  background: #FFFFFF;
+}
