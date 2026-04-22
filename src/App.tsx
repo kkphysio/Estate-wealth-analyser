@@ -125,18 +125,20 @@ export default function App() {
     const r = interestRate / 100 / 12;
     const n = loanDuration * 12;
     
-    // Monthly Payment (EMI)
+    // Standard Amortization EMI
     const emi = loanAmount * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
     
-    // Time Series Data
+    // Time Series Data - WE NOW PROJECT FOR A FIXED 40 YEARS TO SEE POST-LOAN BENEFITS
+    const projectionYears = 40;
     const yearlyData: FinancialDataPoint[] = [];
     const cashFlowData: CashFlowPoint[] = [];
 
     let currentLoanBalance = loanAmount;
     let currentPropValue = propertyPrice;
-    let currentAltValue = downPayment; // CORRECTED: Starts only with own cash
+    let currentAltValue = downPayment; 
     let currentMonthlyRent = monthlyRent;
     let totalInterestPaid = 0;
+    let totalInvestedInB = downPayment; // TRACK COST BASIS FOR ACCURATE TAX
     let crossoverYear: number | null = null;
 
     // Start at Year 0
@@ -151,17 +153,21 @@ export default function App() {
       monthlyOwnerCost: emi + ((currentPropValue * (maintenanceRate / 100)) / 12)
     });
 
-    for (let y = 1; y <= loanDuration; y++) {
+    for (let y = 1; y <= projectionYears; y++) {
       // Internal monthly loop for precision (SIP and Amortization)
       for (let m = 1; m <= 12; m++) {
         // 1. RE Value Appreciation (monthly compounding)
         currentPropValue *= Math.pow(1 + appreciationRate / 100, 1 / 12);
         
-        // 2. Loan Interest and Principal
-        const interestForMonth = currentLoanBalance * r;
-        const principalForMonth = emi - interestForMonth;
-        currentLoanBalance = Math.max(0, currentLoanBalance - principalForMonth);
-        totalInterestPaid += interestForMonth;
+        // 2. Loan Interest and Principal (Only if loan is active)
+        if (y <= loanDuration) {
+          const interestForMonth = currentLoanBalance * r;
+          const principalForMonth = emi - interestForMonth;
+          currentLoanBalance = Math.max(0, currentLoanBalance - principalForMonth);
+          totalInterestPaid += interestForMonth;
+        } else {
+          currentLoanBalance = 0;
+        }
 
         // 3. Maintenance Cost (Annual % / 12)
         const monthlyMaintenance = (currentPropValue * (maintenanceRate / 100)) / 12;
@@ -169,22 +175,30 @@ export default function App() {
         // 4. Alt Strategy growth
         currentAltValue *= Math.pow(1 + altROI / 100, 1 / 12);
         
-        // 5. THE SIP BLIND SPOT: If Scenario A costs more monthly than Scenario B (Rent)
-        // Scenario A outflow = EMI + Maintenance
+        // 5. Monthly Outflow Comparison
+        // Scenario A outflow = EMI (if active) + Maintenance
+        const scenarioAOutflow = (y <= loanDuration ? emi : 0) + monthlyMaintenance;
         // Scenario B outflow = Rent
-        // The difference is "Extra Cash" that is theoretically available to invest in Scenario B
-        const savingInB = (emi + monthlyMaintenance) - currentMonthlyRent;
+        const scenarioBOutflow = currentMonthlyRent;
+        
+        const savingInB = scenarioAOutflow - scenarioBOutflow;
         
         if (savingInB < 0 && crossoverYear === null) {
           crossoverYear = y;
         }
 
-        // Even if negative (Rent > EMI+Maint), we apply it to track wealth accurately
+        // Apply SIP/Withdrawal
         currentAltValue += savingInB;
+        // Only track as "Investment" if we are actually putting money IN, not taking out
+        if (savingInB > 0) {
+          totalInvestedInB += savingInB;
+        }
       }
       
       // End of year rent escalation
       currentMonthlyRent *= (1 + rentEscalation/100);
+
+      const ownerCostYearly = (y <= loanDuration ? emi : 0) + ((currentPropValue * (maintenanceRate / 100)) / 12);
 
       yearlyData.push({
         year: y,
@@ -194,13 +208,13 @@ export default function App() {
         altValue: currentAltValue,
         cumInterest: totalInterestPaid,
         monthlyRent: currentMonthlyRent,
-        monthlyOwnerCost: emi + ((currentPropValue * (maintenanceRate / 100)) / 12)
+        monthlyOwnerCost: ownerCostYearly
       });
 
       // Annual Cash Flow logging
       cashFlowData.push({
         year: y,
-        reCashFlow: -(emi * 12) - (currentPropValue * (maintenanceRate / 100)) + (currentMonthlyRent * 12),
+        reCashFlow: -((y <= loanDuration ? emi : 0) * 12) - (currentPropValue * (maintenanceRate / 100)) + (currentMonthlyRent * 12),
         altCashFlow: 0
       });
     }
@@ -213,14 +227,14 @@ export default function App() {
     // Apply Tax if required
     let finalAltWealthRaw = yearlyData[yearlyData.length - 1].altValue;
     let taxDeducted = 0;
-    const initialCap = downPayment; // CORRECTED: ROI measured against own cash
-    const gains = finalAltWealthRaw - initialCap;
+    const gains = finalAltWealthRaw - totalInvestedInB; // FIXED: Cost Basis uses Cumulative principal
     if (gains > 0) {
       taxDeducted = calculateTaxOnGains(gains, selectedTaxRate);
     }
     const finalAltWealth = finalAltWealthRaw - taxDeducted;
 
-    const beROI = (Math.pow(reFinalNetWorth / initialCap, 1 / loanDuration) - 1) * 100;
+    // ROI needs to be CAGR based on total effective cost for comparison over projection period
+    const reXIRR = (Math.pow(reFinalNetWorth / (downPayment + totalInterestPaid + loanAmount), 1 / projectionYears) - 1) * 100;
 
     return {
       emi,
@@ -228,15 +242,15 @@ export default function App() {
       totalEmiPaid,
       yearlyData,
       cashFlowData,
-      reXIRR: beROI,
+      reXIRR: reXIRR,
       altXIRR: altROI,
       taxDeducted,
       finalAltWealth,
       reFinalNetWealth: reFinalNetWorth,
       finalWealthDiff: reFinalNetWorth - finalAltWealth,
       winnerWealth: reFinalNetWorth > finalAltWealth ? reFinalNetWorth : finalAltWealth,
-      reMultiplier: reFinalNetWorth / initialCap,
-      altMultiplier: finalAltWealth / initialCap,
+      reMultiplier: reFinalNetWorth / downPayment,
+      altMultiplier: finalAltWealth / totalInvestedInB,
       crossoverYear
     };
   }, [downPayment, loanAmount, interestRate, loanDuration, appreciationRate, monthlyRent, altROI, propertyPrice, selectedTaxRate, rentEscalation, maintenanceRate]);
