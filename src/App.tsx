@@ -33,7 +33,9 @@ import {
   BarChart, 
   Bar, 
   Legend,
-  Cell
+  Cell,
+  ReferenceLine,
+  Label
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
@@ -48,6 +50,8 @@ interface FinancialDataPoint {
   netEquity: number;
   altValue: number;
   cumInterest: number;
+  monthlyRent: number;
+  monthlyOwnerCost: number;
 }
 
 interface CashFlowPoint {
@@ -95,6 +99,8 @@ export default function App() {
   const [loanDuration, setLoanDuration] = useState<number>(30);
   const [appreciationRate, setAppreciationRate] = useState<number>(3.5);
   const [monthlyRent, setMonthlyRent] = useState<number>(0);
+  const [rentEscalation, setRentEscalation] = useState<number>(5.0);
+  const [maintenanceRate, setMaintenanceRate] = useState<number>(0.8);
 
   // --- ALTERNATIVE INVESTMENT INPUTS ---
   const [altROI, setAltROI] = useState<number>(9.5);
@@ -102,11 +108,9 @@ export default function App() {
   const [selectedTaxRate, setSelectedTaxRate] = useState<number>(0);
 
   const calculateTaxOnGains = (gains: number, rate: number) => {
-    // Law: First 12L is always tax-free (until 12L no tax)
-    const taxableGains = Math.max(0, gains - 1200000);
-    
-    // Apply chosen manual rate to the surplus amount only
-    return (taxableGains * rate) / 100;
+    // Strictly voluntary: If rate is 0, tax is 0. 
+    // If rate is selected, it applies to the total gains.
+    return (gains * rate) / 100;
   };
 
   // --- UI STATE ---
@@ -123,66 +127,99 @@ export default function App() {
     
     // Monthly Payment (EMI)
     const emi = loanAmount * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
-    const totalEmiPaid = emi * n;
-    const totalInterest = totalEmiPaid - loanAmount;
-
+    
     // Time Series Data
     const yearlyData: FinancialDataPoint[] = [];
     const cashFlowData: CashFlowPoint[] = [];
 
-    for (let y = 0; y <= loanDuration; y++) {
-      const m = y * 12;
-      
-      // Mortgage Calculation at year y
-      // Balance = P * [(1+r)^n - (1+r)^m] / [(1+r)^n - 1]
-      const loanBalance = y === 0 ? loanAmount : 
-          loanAmount * (Math.pow(1 + r, n) - Math.pow(1 + r, m)) / (Math.pow(1 + r, n) - 1);
-      
-      const propValue = propertyPrice * Math.pow(1 + appreciationRate / 100, y);
-      const netEquity = propValue - Math.max(0, loanBalance);
-      
-      // Cumulative interest at year y
-      // This is a rough estimation for the table vs the precise per-month loop
-      // Interest_paid_so_far = (emi * m) - (loanAmount - loanBalance)
-      const cumInterest = y === 0 ? 0 : (emi * m) - (loanAmount - loanBalance);
+    let currentLoanBalance = loanAmount;
+    let currentPropValue = propertyPrice;
+    let currentAltValue = downPayment; // CORRECTED: Starts only with own cash
+    let currentMonthlyRent = monthlyRent;
+    let totalInterestPaid = 0;
+    let crossoverYear: number | null = null;
 
-      // Alternative investment value
-      const totalInitialCapital = propertyPrice; // As per spec: "Principal in hand + Loan amount"
-      const altValue = totalInitialCapital * Math.pow(1 + altROI / 100, y);
+    // Start at Year 0
+    yearlyData.push({
+      year: 0,
+      propValue: currentPropValue,
+      loanBalance: currentLoanBalance,
+      netEquity: currentPropValue - currentLoanBalance,
+      altValue: currentAltValue,
+      cumInterest: 0,
+      monthlyRent: monthlyRent,
+      monthlyOwnerCost: emi + ((currentPropValue * (maintenanceRate / 100)) / 12)
+    });
+
+    for (let y = 1; y <= loanDuration; y++) {
+      // Internal monthly loop for precision (SIP and Amortization)
+      for (let m = 1; m <= 12; m++) {
+        // 1. RE Value Appreciation (monthly compounding)
+        currentPropValue *= Math.pow(1 + appreciationRate / 100, 1 / 12);
+        
+        // 2. Loan Interest and Principal
+        const interestForMonth = currentLoanBalance * r;
+        const principalForMonth = emi - interestForMonth;
+        currentLoanBalance = Math.max(0, currentLoanBalance - principalForMonth);
+        totalInterestPaid += interestForMonth;
+
+        // 3. Maintenance Cost (Annual % / 12)
+        const monthlyMaintenance = (currentPropValue * (maintenanceRate / 100)) / 12;
+        
+        // 4. Alt Strategy growth
+        currentAltValue *= Math.pow(1 + altROI / 100, 1 / 12);
+        
+        // 5. THE SIP BLIND SPOT: If Scenario A costs more monthly than Scenario B (Rent)
+        // Scenario A outflow = EMI + Maintenance
+        // Scenario B outflow = Rent
+        // The difference is "Extra Cash" that is theoretically available to invest in Scenario B
+        const savingInB = (emi + monthlyMaintenance) - currentMonthlyRent;
+        
+        if (savingInB < 0 && crossoverYear === null) {
+          crossoverYear = y;
+        }
+
+        // Even if negative (Rent > EMI+Maint), we apply it to track wealth accurately
+        currentAltValue += savingInB;
+      }
+      
+      // End of year rent escalation
+      currentMonthlyRent *= (1 + rentEscalation/100);
 
       yearlyData.push({
         year: y,
-        propValue,
-        loanBalance: Math.max(0, loanBalance),
-        netEquity,
-        altValue,
-        cumInterest
+        propValue: currentPropValue,
+        loanBalance: currentLoanBalance,
+        netEquity: currentPropValue - currentLoanBalance,
+        altValue: currentAltValue,
+        cumInterest: totalInterestPaid,
+        monthlyRent: currentMonthlyRent,
+        monthlyOwnerCost: emi + ((currentPropValue * (maintenanceRate / 100)) / 12)
       });
 
-      // Annual Cash Flow (Outflows are negative)
-      // RE: - (EMI * 12) + (Rent * 12)
-      if (y > 0) {
-        cashFlowData.push({
-          year: y,
-          reCashFlow: -(emi * 12) + (monthlyRent * 12),
-          altCashFlow: 0 // In this comparison model, we assume the full capital is locked in Alt
-        });
-      }
+      // Annual Cash Flow logging
+      cashFlowData.push({
+        year: y,
+        reCashFlow: -(emi * 12) - (currentPropValue * (maintenanceRate / 100)) + (currentMonthlyRent * 12),
+        altCashFlow: 0
+      });
     }
 
-    // Final Verdict Calculation
+    // Results summary...
+    const totalEmiPaid = emi * (loanDuration * 12);
+    const totalInterest = totalInterestPaid;
     const reFinalNetWorth = yearlyData[yearlyData.length - 1].netEquity;
     
     // Apply Tax if required
     let finalAltWealthRaw = yearlyData[yearlyData.length - 1].altValue;
     let taxDeducted = 0;
-    const gains = finalAltWealthRaw - propertyPrice;
+    const initialCap = downPayment; // CORRECTED: ROI measured against own cash
+    const gains = finalAltWealthRaw - initialCap;
     if (gains > 0) {
       taxDeducted = calculateTaxOnGains(gains, selectedTaxRate);
     }
     const finalAltWealth = finalAltWealthRaw - taxDeducted;
 
-    const initialCap = propertyPrice;
     const beROI = (Math.pow(reFinalNetWorth / initialCap, 1 / loanDuration) - 1) * 100;
 
     return {
@@ -194,12 +231,15 @@ export default function App() {
       reXIRR: beROI,
       altXIRR: altROI,
       taxDeducted,
+      finalAltWealth,
+      reFinalNetWealth: reFinalNetWorth,
       finalWealthDiff: reFinalNetWorth - finalAltWealth,
       winnerWealth: reFinalNetWorth > finalAltWealth ? reFinalNetWorth : finalAltWealth,
       reMultiplier: reFinalNetWorth / initialCap,
-      altMultiplier: finalAltWealth / initialCap
+      altMultiplier: finalAltWealth / initialCap,
+      crossoverYear
     };
-  }, [downPayment, loanAmount, interestRate, loanDuration, appreciationRate, monthlyRent, altROI, propertyPrice, selectedTaxRate]);
+  }, [downPayment, loanAmount, interestRate, loanDuration, appreciationRate, monthlyRent, altROI, propertyPrice, selectedTaxRate, rentEscalation, maintenanceRate]);
 
   const reportRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -325,7 +365,27 @@ export default function App() {
                     max={200000} 
                     step={1000} 
                     isCurrency 
-                    subLabel="If staying there, use 'Rent Saved' value here."
+                    subLabel="Current market rent for similar property."
+                  />
+                  <SliderInput 
+                    label="Rent Escalation (%)" 
+                    value={rentEscalation} 
+                    onChange={setRentEscalation} 
+                    min={0} 
+                    max={20} 
+                    step={0.1} 
+                    suffix="%" 
+                    subLabel="India Average: 5 - 8% yearly."
+                  />
+                  <SliderInput 
+                    label="Maint. & Taxes (%)" 
+                    value={maintenanceRate} 
+                    onChange={setMaintenanceRate} 
+                    min={0} 
+                    max={5} 
+                    step={0.1} 
+                    suffix="%" 
+                    subLabel="India Average: 0.5 - 1.2% of value."
                   />
                 </div>
             </div>
@@ -340,39 +400,38 @@ export default function App() {
                   <SliderInput label="Investment Returns (ROI %)" value={altROI} onChange={setAltROI} min={1} max={30} step={0.01} suffix="%" />
                   
                   <div className="space-y-3">
-                    <label className="text-xs uppercase font-bold text-secondary-text tracking-widest">Select Tax Slab (Manual)</label>
+                    <label className="text-xs uppercase font-bold text-secondary-text tracking-widest">Select Capital Gains Tax Slab</label>
                     <select 
                       value={selectedTaxRate}
                       onChange={(e) => setSelectedTaxRate(Number(e.target.value))}
                       className="w-full bg-input-bg border border-border-color rounded-md px-3 py-2.5 text-base font-black text-primary-text outline-none focus:border-alt transition-colors appearance-none cursor-pointer"
                       style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' fill=\'none\' viewBox=\'0 0 24 24\' stroke=\'%2394A3B8\'%3E%3Cpath stroke-linecap=\'round\' stroke-linejoin=\'round\' stroke-width=\'2\' d=\'M19 9l-7 7-7-7\'%3E%3C/path%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.75rem center', backgroundSize: '1.25rem' }}
                     >
-                      <option value={0}>Nil (Up to ₹4,00,000)</option>
-                      <option value={5}>5% (₹4,00,001 - ₹8,00,000)</option>
-                      <option value={10}>10% (₹8,00,001 - ₹12,00,000)</option>
-                      <option value={15}>15% (₹12,00,001 - ₹16,00,000)</option>
-                      <option value={20}>20% (₹16,00,001 - ₹20,00,000)</option>
-                      <option value={25}>25% (₹20,00,001 - ₹24,00,000)</option>
-                      <option value={30}>30% (Above ₹24,00,000)</option>
+                      <option value={0}>No Tax (0%)</option>
+                      <option value={5}>5% Slab</option>
+                      <option value={10}>10% Slab</option>
+                      <option value={12.5}>12.5% (LTCG - Equity)</option>
+                      <option value={15}>15% Slab</option>
+                      <option value={20}>20% Slab</option>
+                      <option value={25}>25% Slab</option>
+                      <option value={30}>30% Slab</option>
                     </select>
-                    {results.yearlyData[results.yearlyData.length - 1].altValue - propertyPrice <= 1200000 ? (
-                      <p className="text-[10px] text-highlight font-bold uppercase leading-tight mt-1 opacity-80">
-                        Zero Tax: All gains are below the ₹12,00,000 exemption limit.
-                      </p>
-                    ) : (
-                      <p className="text-[10px] text-highlight font-bold uppercase leading-tight mt-1 opacity-80">
-                        Exemption applied: {selectedTaxRate}% rate applies only to gains above ₹12,00,000.
-                      </p>
-                    )}
+                    <p className="text-[10px] text-highlight font-bold uppercase leading-tight mt-1 opacity-80">
+                      {selectedTaxRate === 0 
+                        ? "Zero Tax Selected: All gains in Scenario B are tax-free."
+                        : `Applying ${selectedTaxRate}% tax on the total profit of Scenario B.`
+                      }
+                    </p>
                   </div>
 
                   <div className="p-6 bg-input-bg rounded-sm border border-border-color flex items-center justify-between shadow-inner">
                       <div>
-                        <p className="text-xs uppercase text-secondary-text font-bold mb-1">Total Asset Value</p>
-                        <p className="text-2xl font-black text-primary-text">{formatCurrency(propertyPrice)}</p>
+                        <p className="text-xs uppercase text-secondary-text font-bold mb-1">Starting Investment (B)</p>
+                        <p className="text-2xl font-black text-primary-text">{formatCurrency(downPayment)}</p>
+                        <p className="text-[10px] text-tertiary-text uppercase font-bold mt-1">Equal to Home Down Payment</p>
                       </div>
                       <div className="text-right">
-                         <p className="text-xs uppercase text-secondary-text font-bold mb-1">Lakhs/Crore</p>
+                         <p className="text-xs uppercase text-secondary-text font-bold mb-1">Total Property Value</p>
                          <p className="text-sm font-bold text-alt-light uppercase">{getLakCrLabel(propertyPrice)}</p>
                       </div>
                   </div>
@@ -444,30 +503,69 @@ export default function App() {
                       <Area type="monotone" dataKey="netEquity" name="My Value in Home" stroke="#639922" strokeWidth={2.5} fill="url(#grRE)" />
                       <Area type="monotone" dataKey="altValue" name="Investment Value" stroke="#378ADD" strokeWidth={3} fill="url(#grAlt)" />
                       <Area type="monotone" dataKey="cumInterest" name="Total Interest Paid" stroke="#E24B4A" fill="none" strokeWidth={2} strokeDasharray="5 5" />
+                      
+                      {results.crossoverYear && (
+                        <ReferenceLine 
+                          x={results.crossoverYear} 
+                          stroke="#EF9F27" 
+                          strokeWidth={3} 
+                        >
+                          <Label 
+                            value="SIP STOPPED" 
+                            position="top" 
+                            fill="#EF9F27" 
+                            fontSize={10} 
+                            fontWeight="900" 
+                          />
+                        </ReferenceLine>
+                      )}
                     </AreaChart>
                   </ResponsiveContainer>
+                  
+                  {results.crossoverYear ? (
+                    <div className="mt-4 p-3 bg-highlight-dark/30 border-l-2 border-highlight rounded-r-md">
+                       <p className="text-[10px] text-highlight font-black uppercase tracking-widest mb-1 flex items-center gap-2">
+                          <AlertTriangle className="w-3 h-3" /> Rent Crossover: Year {results.crossoverYear}
+                       </p>
+                       <p className="text-[10px] text-secondary-text leading-relaxed uppercase">
+                          Phase 1: Your Rent was lower than Home costs. You were doing a <span className="text-white">Monthly SIP</span>.
+                          <br />
+                          Phase 2: Rent is now higher. You are now <span className="text-re-light font-bold">Withdrawing</span> from your corpus every month.
+                       </p>
+                    </div>
+                  ) : (
+                    <div className="mt-4 p-3 bg-surface border border-border-color rounded-sm">
+                       <p className="text-[10px] text-re-light font-black uppercase tracking-widest mb-1">Constant Saving Mode</p>
+                       <p className="text-[10px] text-secondary-text leading-relaxed uppercase">
+                          Your Rent remains lower than Home ownership costs throughout the 20-year period. You are saving every single month.
+                       </p>
+                    </div>
+                  )}
                </ChartContainer>
 
-               {/* Chart 2: Cost Breakdown */}
-               <ChartContainer title="Where did the Money go?" sub={`Final Profit/Loss at Year ${loanDuration}`}>
+               {/* Chart 2: Cash Flow Comparison */}
+               <ChartContainer title="Monthly Outflow Comparison" sub="House (EMI+Maint) vs Rent Escalation">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={costBreakdownData} layout="vertical" margin={{ left: 60, right: 40 }}>
-                      <CartesianGrid horizontal={false} stroke="#334155" strokeOpacity={0.5} />
-                      <XAxis type="number" hide />
-                      <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{ fill: '#F8FAFC', fontWeight: 'bold', fontSize: 11 }} />
+                    <AreaChart data={results.yearlyData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" strokeOpacity={0.5} />
+                      <XAxis dataKey="year" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#94A3B8' }} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#94A3B8' }} tickFormatter={(v) => formatCurrency(v).replace('₹', '')} />
                       <Tooltip 
-                        cursor={{ fill: '#334155', opacity: 0.5 }}
                         contentStyle={{ backgroundColor: '#1E293B', border: '1px solid #334155' }}
                         formatter={(v: number) => formatCurrency(v)}
                       />
-                      <Legend iconType="circle" wrapperStyle={{ fontSize: '11px' }} />
-                      <Bar dataKey="Down Payment" stackId="a" fill="#378ADD" fillOpacity={0.8} />
-                      <Bar dataKey="Initial Capital" stackId="a" fill="#378ADD" fillOpacity={0.8} />
-                      <Bar dataKey="Principal Repaid" stackId="a" fill="#639922" fillOpacity={0.8} />
-                      <Bar dataKey="Interest Paid" stackId="a" fill="#E24B4A" fillOpacity={0.8} />
-                      <Bar dataKey="Investment Returns" stackId="a" fill="#639922" fillOpacity={0.8} />
-                      <Bar dataKey="Appreciation" stackId="a" fill="#EF9F27" fillOpacity={0.8} />
-                    </BarChart>
+                      <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '11px', textTransform: 'uppercase' }} />
+                      <Area type="step" dataKey="monthlyOwnerCost" name="Own: EMI + Maint" stroke="#E24B4A" strokeWidth={2} fill="none" />
+                      <Area type="monotone" dataKey="monthlyRent" name="Rent Strategy Cost" stroke="#378ADD" strokeWidth={2} fill="rgba(55, 138, 221, 0.1)" />
+                      {results.crossoverYear && (
+                        <ReferenceLine 
+                          x={results.crossoverYear} 
+                          stroke="#EF9F27" 
+                          strokeWidth={2} 
+                          label={{ value: 'CROSSOVER', fill: '#EF9F27', fontSize: 10, fontWeight: 'bold', position: 'insideBottomRight' }}
+                        />
+                      )}
+                    </AreaChart>
                   </ResponsiveContainer>
                </ChartContainer>
             </motion.div>
@@ -486,7 +584,7 @@ export default function App() {
                 toggle={() => setExpandedTable(expandedTable === 'summary' ? null : 'summary')}
                 colorClass="bg-highlight-dark/20 border-highlight text-highlight-light"
               >
-                <ComparisonSummaryTable results={results} propertyPrice={propertyPrice} initialCap={propertyPrice} duration={loanDuration} />
+                <ComparisonSummaryTable results={results} downPayment={downPayment} duration={loanDuration} />
               </TableSection>
 
               {/* RE Schedule */}
@@ -522,6 +620,18 @@ export default function App() {
            
            <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 text-primary-text">
               <div className="space-y-6">
+                 {/* Tax Explanation Section */}
+                 <div className="bg-[#0F172A] border border-alt/30 p-5 rounded-sm">
+                    <h4 className="text-xs font-bold text-alt-light uppercase tracking-widest mb-3 flex items-center gap-2">
+                       <Info className="w-3.5 h-3.5" /> Simple Tax Explanation
+                    </h4>
+                    <p className="text-sm text-secondary-text leading-relaxed">
+                       Tax is calculated <span className="text-white font-bold italic">only if you choose to</span>. If you select 0%, no tax is deducted. If you select a percentage, it applies to the total growth of your investment.
+                       <br/><br/>
+                       <span className="text-[10px] uppercase font-bold text-highlight">Note:</span> Common India LTCG (Long Term Capital Gains) is currently 12.5%.
+                    </p>
+                 </div>
+
                 <div>
                   <h3 className="text-xs font-bold uppercase tracking-widest text-secondary-text mb-4">Comparison of Performance</h3>
                   <div className="grid grid-cols-2 gap-4">
@@ -832,9 +942,9 @@ function InsightItem({ title, desc }: { title: string; desc: string }) {
 
 // --- TABLES ---
 
-function ComparisonSummaryTable({ results, propertyPrice, initialCap, duration }: any) {
-  const reNetGain = results.yearlyData[results.yearlyData.length-1].netEquity - (propertyPrice);
-  const altNetGain = results.yearlyData[results.yearlyData.length-1].altValue - initialCap;
+function ComparisonSummaryTable({ results, downPayment, duration }: any) {
+  const reNetGain = results.reFinalNetWealth - downPayment;
+  const altNetGain = results.finalAltWealth - downPayment;
 
   return (
     <table className="w-full text-left font-sans">
@@ -847,14 +957,14 @@ function ComparisonSummaryTable({ results, propertyPrice, initialCap, duration }
         </tr>
       </thead>
       <tbody className="text-sm divide-y divide-border-color/30 text-primary-text">
-        <SummaryRow label="Total Principal Basis" re={formatCurrency(propertyPrice)} alt={formatCurrency(initialCap)} diff="Equal" />
-        <SummaryRow label="Portfolio Value end of YR" re={formatCurrency(results.yearlyData[results.yearlyData.length-1].propValue)} alt={formatCurrency(results.yearlyData[results.yearlyData.length-1].altValue)} diff={formatCurrency(Math.abs(results.finalWealthDiff))} />
-        <SummaryRow label="True Net Wealth (Final)" re={formatCurrency(results.yearlyData[results.yearlyData.length-1].netEquity)} alt={formatCurrency(results.yearlyData[results.yearlyData.length-1].altValue)} diff={formatCurrency(Math.abs(results.finalWealthDiff))} isFinal />
-        <SummaryRow label="Cagr Equivalent" re={formatPercent((reNetGain/propertyPrice)*100)} alt={formatPercent((altNetGain/initialCap)*100)} diff="" />
+        <SummaryRow label="Initial Cash Basis" re={formatCurrency(downPayment)} alt={formatCurrency(downPayment)} diff="Equal" />
+        <SummaryRow label="Portfolio Value end of YR" re={formatCurrency(results.yearlyData[results.yearlyData.length-1].propValue)} alt={formatCurrency(results.yearlyData[results.yearlyData.length-1].altValue)} diff={formatCurrency(Math.abs(results.yearlyData[results.yearlyData.length-1].propValue - results.yearlyData[results.yearlyData.length-1].altValue))} />
+        <SummaryRow label="True Net Wealth (Post-Tax)" re={formatCurrency(results.reFinalNetWealth)} alt={formatCurrency(results.finalAltWealth)} diff={formatCurrency(Math.abs(results.finalWealthDiff))} isFinal />
+        <SummaryRow label="Growth Multiplier" re={`${results.reMultiplier.toFixed(2)}x`} alt={`${results.altMultiplier.toFixed(2)}x`} diff="" />
         <tr className="bg-highlight-dark/30">
-           <td className="px-6 py-6 font-black uppercase text-highlight-light">Critical ROI needed to match House</td>
+           <td className="px-6 py-6 font-black uppercase text-highlight-light">Break-even ROI needed</td>
            <td className="px-6 py-6">-</td>
-           <td className="px-6 py-6 font-black text-2xl text-highlight leading-none">{results.beROI.toFixed(2)}%</td>
+           <td className="px-6 py-6 font-black text-2xl text-highlight leading-none">{results.reXIRR.toFixed(2)}%</td>
            <td className="px-6 py-6 text-right opacity-80 text-xs font-bold uppercase italic">The Threshold</td>
         </tr>
       </tbody>
